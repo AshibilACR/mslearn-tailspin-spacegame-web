@@ -2,3 +2,5 @@ pool:
  name: default
 steps:
 - bash: echo hello world
+trigger: 
+ -master
