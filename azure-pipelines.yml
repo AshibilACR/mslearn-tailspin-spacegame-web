@@ -1,116 +1,102 @@
+# Docker
+# Build a Docker image
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker
 
-#add a pipeline trigger to run your pipeline
-#In this example, pipeline will be triggered when there is code changes commited to master branch of current repository
-#More complex trigger condition can be found at https://docs.microsoft.com/en-us/azure/devops/pipelines/process/pipeline-triggers?view=azure-devops&tabs=yaml
 trigger:
-    - master
+  - main
 
-#checkout multiple repositories in the pipeline
 resources:
   repositories:
-  #1) this repository contains ADOCS share templates
-  #https://github.com/ACRCode/ADOCS-templates
-  #Required
   - repository: azureSharedTemplates
     type: github
-    endpoint: ACRCode
+    endpoint: ACRCode-ALZNET
     name: ACRCode/ADOCS-templates
     branch: master
-  #2) this repository is for AWS Cloudformation Template and Azure ARM
-  #https://github.com/ACRCode/InfrastructureAsCode
-  #Optional: only if current project need to use cloudformation templates from share repo
-  - repository: InfrastureAsCode
-    type: github
-    endpoint: ACRCode
-    name: ACRCode/InfrastructureAsCode
-    branch: main
 
-# variable group defined in Azure DevOps Library
-# Optional - only when project has variable group defined in Library
-
-# variables:
-#   - group: Project Variable
-
-#ADOCS requires pipeline yaml file extending from shared template created by ADOCS team
-# You should provide parameters defined in shared template (shared-template.yml) as show below
 extends:
-  template: shared-template.yml@azureSharedTemplates #Refer to the resources section repo 1)
-  # Below are parameters needed for shared template
+  template: shared-template.yml@azureSharedTemplates
   parameters:
-    #parameters to set build version
     buildVersionMajor: 1
     buildVersionMinor: 0
-    #Required
-    #Provide tasks which will be executed for build process
-    #Below is an example of tasks for .net Core project
     buildSteps:
       - checkout: self
+      - task: NuGetToolInstaller@1
+        inputs:
+          versionSpec: '6.x'
       - task: DotNetCoreCLI@2
-        displayName: 'Restore Nuget Packages'
+        displayName: Project Restore
         inputs:
           command: 'restore'
-          projects: '**/*.csproj'
-          feedsToUse: 'select'
+          projects: 'ALZNetApp.SiteManagement.Api/**.sln'
+          feedsToUse: 'config'
+          nugetConfigPath: 'ALZNetApp.SiteManagement.Api/nuget.config'
+          externalFeedCredentials: 'ACR Nexus Nuget Host with Credential-ALZNET'
           noCache: true
       - task: DotNetCoreCLI@2
-        displayName: Build the .net Core project
+        displayName: Build Project
         inputs:
           command: 'build'
+          projects: 'ALZNetApp.SiteManagement.Api/**.sln'
           arguments: '--configuration Release'
-          projects: '**/*.csproj'
       - task: DotNetCoreCLI@2
-        displayName: 'Run Unit Tests'
-        inputs:
-          command: 'test'
-          projects: '**/*.csproj' 
-          publishTestResults: true
-      - task: DotNetCoreCLI@2
-        displayName: Publish the .net Core project
+        displayName: Publish Project
         inputs:
           command: 'publish'
           publishWebProjects: false
-          projects: '**/*.csproj'
-          arguments: '--no-build --configuration Release --output $(Build.ArtifactStagingDirectory)'
+          projects: 'ALZNetApp.SiteManagement.Api/**.csproj'
+          arguments: '-p:PublishReadyToRun=true --framework net6.0 --configuration Release --runtime win-x64 --self-contained false --output $(Build.ArtifactStagingDirectory)/NugetPackage'
+          zipAfterPublish: false
           modifyOutputPath: false
+      - task: CmdLine@2
+        displayName: Create nuget spec file .nuspec
+        inputs:
+          script: 'nuget.exe spec ACR.AlznetApp.SiteManagement'
+          workingDirectory: '$(Build.ArtifactStagingDirectory)/NugetPackage'
+      - task: NuGetCommand@2
+        displayName: Pack Nuget package
+        inputs:
+          command: 'pack'
+          packagesToPack: '$(Build.ArtifactStagingDirectory)/NugetPackage/*.nuspec'
+          packDestination: '$(Build.SourcesDirectory)/nupkg'
+          versioningScheme: 'byEnvVar'
+          versionEnvVar: 'BUILD_BUILDNUMBER'
+      - task: NuGetCommand@2
+        inputs:
+          command: 'push'
+          packagesToPush: '$(Build.SourcesDirectory)/nupkg/*.nupkg;!$(Build.SourcesDirectory)/nupkg/**/*.symbols.nupkg'
+          nuGetFeedType: 'external'
+          publishFeedCredentials: 'ACR Nexus with ApiKey-ALZNET'
+      - task: ArchiveFiles@2
+        inputs:
+          rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/NugetPackage'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.Artifactstagingdirectory)/deploymentartifact.$(Build.BuildNumber).zip'
+          replaceExistingArchive: true
       - task: PublishPipelineArtifact@1
         inputs:
-          targetPath: '$(Build.ArtifactStagingDirectory)'
-          artifact: 'drop' #Name can be anything you want
+          targetPath: '$(Build.Artifactstagingdirectory)/deploymentartifact.$(Build.BuildNumber).zip'
+          artifact: 'deploymentartifact'
           publishLocation: 'pipeline'
-    #Choose if the project needs to use self hosted agents instead of Microsoft hosted agent
-    #For example, if project needs to restore nuget packages which are hosted in ACR internal package server, then needs to use self hosted agents
-    useSelfHostedAgents: false
-    #If useSelfHostedAgents = false: 
-    #Provide your prefered Microsoft hosted agent pool image, with which you build tasks will be executed. Default is 'ubuntu-latest'
-    #For more image options, check https://docs.microsoft.com/en-us/azure/devops/pipelines/agents/hosted?view=azure-devops&tabs=yaml#use-a-microsoft-hosted-agent
+      # - task: pipeline-triggerer-task@0
+      #   inputs:
+      #     adoServiceConnection: 'Azure DevOps API for triggering release from build pipeline-ALZNET'
+      #     Project: '44614b60-076f-455a-bc50-b62dc92f5ee8'
+      #     PipelineType: 'Release'
+      #     Async: true
     buildPoolImage: 'windows-latest'
-    #If useSelfHostedAgents = true: 
-    #Provide the self hosted agent pool name which is shared with your project, you can find the agent pool in project settings
-    #If you are not sure about how to find it or the agent pool is not shared with your project, please contact ADOCS team for help
-    selfHostedAgentPoolForBuild: 'Local Agents'
-    #For specifing the requirement of ACR hosted agent, for example, need to use windows agent, then use below parameter
-    selfHostedAgentPoolForBuildDemands: ['agent.os -equals Windows_NT']
-    ##############################################
-    #Below parameters related to ACR Security Scans
-    #Please Choose on-premise agent to run security scans, 
     securityScanAgentPool: 'Local Agents'
-    #Option to turn on/off Checkmarx Security Scan: if false, Checkmarx scan will not be ran for current pipeline
     runCheckMarxScan: true
-    #Option to turn on/off Nexus IQ Scan: if false, Nexus IQ scan will not be ran for current pipeline
     runIQScan: true
-    #Service connection which will be used to connect to Checkmarx server. By default, 'ACR Checkmarx' will be shared with each project and used by security scan.
-    #Provide your own checkmarx service connection if you don't want to use default one.
-    CheckmarxServiceConnection: 'ACR Checkmarx'
-    CheckmarxProject: '<Your checkmarx project name>'
+    CheckmarxServiceConnection: 'ACR Checkmarx-ALZNET'
+    CheckmarxProject: 'alznet_app_lambda_sitemanagement'
     CheckmarxCustomPreset: 'ACR Default'
-    CheckmarxFullTeamName: '<Your checkmarx team>'
-    CheckmarxFolderExclusion: 'cvs, .svn, .hg , .git, .bzr, bin , obj,  backup, .idea, node_modules'
-    #Service connection which will be used to connect to Nexus IQ server. By default, 'ACR Nexus IQ' will be shared with each project and used by security scan.
-    #Provide your own Nexus IQ service connection if you don't want to use default one.
-    NexusServiceConnection: 'ACR Nexus IQ'
-    NexusAppId: '<Your Nexus IQ Application Id>'
-    NexusScanStage: '<Scan stage for Nexus IQ>' #default is 'Build'
-    # The name of the artifact to download to On-prem agent from pipeline for Nexus IQ Scan. If left empty, it will download all artifacts associated to the pipeline run.
-    ArtifactsForNexusScan: ''  
-    #A list of Ant-style patterns relative to the workspace root that denote the files/archives to be scanned, e.g. **/target/*.war, **/target/*.ear. 
+    CheckmarxFullTeamName: 'CxServer\SOC\ACR\All\Dev\Alznet'
+    CheckmarxFolderExclusion: 'build,node_modules,public/app-assets,cvs, .svn, .hg , .git, .bzr, bin , obj,  backup, .idea, node_modules'
+    NexusServiceConnection: 'ACR Nexus IQ-ALZNET'
+    NexusAppId: 'AlznetAppSiteManagement'
+    NexusScanStage: 'Build'
+    ArtifactsForNexusScan: ''   
     NexusScanTarget: '$(Build.SourcesDirectory)/Nexus/**/**.zip'
+    IsCloudProject: false
+    InfrastructureAsCodeScanTargetPath: '$(Build.SourcesDirectory)/CloudformationTemplates'
